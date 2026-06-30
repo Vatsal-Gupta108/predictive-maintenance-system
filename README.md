@@ -2,7 +2,7 @@
 
 An end-to-end, industry-grade Machine Learning and IoT predictive maintenance system designed to predict mechanical breakdowns in manufacturing machinery before they occur.
 
-This project is structured as a portfolio-grade repository demonstrating production software engineering practices, time-series feature engineering, REST API microservices, interactive dashboard design, automated testing, and high-availability edge failover architectures.
+This project is structured as a portfolio-grade repository demonstrating production software engineering practices, time-series feature engineering, REST API microservices, interactive dashboard design, automated testing, configuration management, structured logging, experiment tracking, containerization, and high-availability edge failover architectures.
 
 ---
 
@@ -15,6 +15,8 @@ This system models real manufacturing dynamics using these key engineering steps
 3. **Rolling & Lag Features**: Single-point telemetry lacks historical context. We calculate 6h and 24h rolling averages/standard deviations to capture recent anomalies and gradual mechanical drift.
 4. **Physical Sensor Stress Interactions**: We derive interaction variables (e.g. Temperature $\times$ Pressure for thermal-mechanical fatigue, Rotational Speed $\times$ Vibration for fatigue loads).
 5. **High-Availability Edge Failover**: If the FastAPI backend server is offline, the Streamlit dashboard switches seamlessly to local execution by loading weights natively, ensuring zero uptime interruption for the factory operators.
+6. **Enterprise Configuration & Logging**: Implements standard environment variables (via `config.py` and `.env`) and structured JSON logs (per-line format in `logs/app.log`), making the system immediately ready for production log aggregators (ELK, Loki).
+7. **SQLite MLflow Tracking**: Logs training parameters (hyperparameters, metrics, F1-scores, and models) to a local SQLite database (`mlflow.db`) rather than flat text folders, conforming to modern experiment standards.
 
 ---
 
@@ -23,26 +25,18 @@ This system models real manufacturing dynamics using these key engineering steps
 ```text
 predictive analysis/
 │
-├── data/                    # Telemetry datasets
-│   └── generate_dataset.py  # Physics-based data simulator
-│
-├── src/                     # Core python modules
-│   ├── __init__.py
-│   ├── data_ingestion.py    # Raw data loading, cleaning & window labeling
-│   ├── feature_engineering.py# Rolling statistics, lags & interactions
-│   ├── train.py             # Chronological split, scale & model comparison
-│   └── explain.py           # Feature importance & deviation attributions
+├── .github/workflows/
+│   └── ci.yml               # GitHub Actions CI/CD Pipeline
 │
 ├── api/                     # REST API Backend (FastAPI)
-│   ├── main.py              # Route handlers and decision thresholds
-│   └── schemas.py           # Pydantic schema validation
+│   ├── main.py              # Route handlers, lifespans & exception filters
+│   └── schemas.py           # Pydantic schema validation & bounds checking
 │
 ├── dashboard/               # Frontend Operator Control Center
-│   └── app.py               # Streamlit application
+│   └── app.py               # Streamlit application (with failover mode)
 │
-├── tests/                   # Pytest automation test suite
-│   ├── test_features.py     # Mathematical checks
-│   └── test_api.py          # API route response checks
+├── data/                    # Telemetry datasets
+│   └── generate_dataset.py  # Physics-based data simulator
 │
 ├── docs/                    # Architecture and report files
 │   ├── assets/              # Exported plots (correlations, matrices, etc.)
@@ -50,8 +44,27 @@ predictive analysis/
 │   ├── architecture.md      # Data flow diagrams
 │   └── api_docs.md          # Request/response documentation
 │
+├── src/                     # Core python modules
+│   ├── __init__.py
+│   ├── config.py            # Environment configuration parser
+│   ├── logger.py            # Dual-handler console & JSON structured logging
+│   ├── exceptions.py        # Custom business exception definitions
+│   ├── data_ingestion.py    # Raw data loading, cleaning & window labeling
+│   ├── feature_engineering.py# Rolling statistics, lags & interactions
+│   ├── train.py             # Chronological split, scale & model comparison (MLflow)
+│   └── explain.py           # Feature importance & deviation attributions
+│
+├── tests/                   # Pytest automation test suite
+│   ├── test_features.py     # Mathematical checks
+│   ├── test_api.py          # API route response checks
+│   └── test_validation.py   # Pydantic validation & config loader tests
+│
+├── .env.example             # Configuration variables template
+├── .gitignore               # Excluded caches, venv, databases, and logs
+├── Dockerfile               # Consolidated container setup
+├── docker-compose.yml       # Multi-container microservice orchestrator
+├── render.yaml              # Cloud deployment blueprint
 ├── requirements.txt         # Core dependencies
-├── .gitignore               # Excluded caches, venv, and large binaries
 └── README.md                # System documentation
 ```
 
@@ -72,47 +85,66 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 2. Generate Simulated Data
+### 2. Configure Environment Settings
+Copy the environment template file:
+```bash
+cp .env.example .env
+```
+You can edit the active `.env` file to customize settings such as `DECISION_THRESHOLD` (default: `0.15`), `PORT` (default: `8000`), or `LOG_LEVEL` (default: `INFO`).
+
+### 3. Generate Simulated Data
 Run the physics simulator to populate telemetry and repair logs:
 ```bash
 python -m data.generate_dataset
 ```
 
-### 3. Run EDA & Visualization
-Perform statistical analysis and export reports/plots:
-```bash
-python -m src.eda
-```
-
-### 4. Train Models
-Scale features, fit models (Logistic Regression, Random Forest, Gradient Boosting), evaluate them, and serialize the champion weights:
+### 4. Train Models & Track Experiments (MLflow)
+Scale features, evaluate classifiers, and write runs directly to the SQLite tracking database:
 ```bash
 python -m src.train
 ```
-
-### 5. Generate Baselines & Global Explanations
-Computes healthy sensor averages and draws importance charts:
+To launch the **MLflow Dashboard** and explore hyperparameters, plots, and models:
 ```bash
-python -m src.explain
+mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
+Visit `http://localhost:5000` in your browser.
 
-### 6. Run the REST API Backend
+### 5. Run the REST API Backend
 Launch FastAPI using Uvicorn:
 ```bash
 python -m uvicorn api.main:app --reload
 ```
-You can view interactive Swagger docs at `http://127.0.0.1:8000/docs`.
+View the interactive Swagger docs at `http://127.0.0.1:8000/docs`. Audit logs will be printed to stdout in human-readable text and written to `logs/app.log` as structured JSON objects.
 
-### 7. Launch Streamlit Control Center
+### 6. Launch Streamlit Control Center
 In a new terminal window (with venv activated), start the dashboard UI:
 ```bash
 streamlit run dashboard/app.py
 ```
 
-### 8. Run Verification Test Suite
+### 7. Run Verification Test Suite
 Execute the pytest suite:
 ```bash
-python -m pytest
+python -m pytest -v
+```
+
+---
+
+## Running with Docker (Containerized Microservices)
+
+To spin up the entire multi-container architecture in a single command (which automatically generates the simulation dataset, trains the model, launches the API backend, and boots up the Streamlit frontend client):
+
+```bash
+# Build and run containers
+docker-compose up --build
+```
+
+- **Inference API**: Running at `http://localhost:8000`
+- **Operator Dashboard**: Running at `http://localhost:8501`
+
+To tear down the containers and clean up volumes:
+```bash
+docker-compose down -v
 ```
 
 ---

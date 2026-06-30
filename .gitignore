@@ -52,3 +52,8 @@ models/feature_importances.csv
 # OS files
 .DS_Store
 Thumbs.db
+
+# Project logs & databases
+logs/
+mlflow.db
+mlruns/

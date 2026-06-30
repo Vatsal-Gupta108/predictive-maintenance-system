@@ -2,28 +2,27 @@ import os
 import joblib
 import pandas as pd
 import numpy as np
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, Request, UploadFile, File, status
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from io import BytesIO
+from contextlib import asynccontextmanager
+from typing import Dict, Any
 
-from api.schemas import PredictionRequest, PredictionResponse, HealthResponse, TelemetryRecord
+from api.schemas import PredictionRequest, PredictionResponse, HealthResponse
+from src.config import Config
+from src.logger import get_logger
+from src.exceptions import (
+    PredictiveMaintenanceException,
+    ModelNotLoadedError,
+    DataValidationError,
+    InferenceError
+)
 from src.feature_engineering import FeatureEngineer
 from src.explain import ModelExplainer
 
-app = FastAPI(
-    title="IoT Predictive Maintenance API",
-    description="API for real-time machine health monitoring and breakdown predictions.",
-    version="1.0.0"
-)
-
-# Enable CORS for frontend integrations
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Setup structured logger
+logger = get_logger("API")
 
 # Global variables for model state
 model = None
@@ -33,41 +32,83 @@ healthy_baseline = None
 explainer = None
 feature_engineer = None
 
-# Optimized decision threshold for imbalanced classes
-DECISION_THRESHOLD = 0.15
-
-@app.on_event("startup")
 def load_model_artifacts():
+    """Helper to load joblib weights on server initialization."""
     global model, scaler, feature_names, healthy_baseline, explainer, feature_engineer
     try:
-        model_path = "models/best_model.joblib"
-        scaler_path = "models/scaler.joblib"
-        feature_cols_path = "models/feature_cols.joblib"
-        baseline_path = "models/baseline_healthy.joblib"
-        
-        # Verify paths
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file missing: {model_path}")
+        logger.info(f"Attempting to load model from: {Config.MODEL_PATH}")
+        if not os.path.exists(Config.MODEL_PATH):
+            raise FileNotFoundError(f"Model file missing at: {Config.MODEL_PATH}")
             
-        model = joblib.load(model_path)
-        scaler = joblib.load(scaler_path)
-        feature_names = joblib.load(feature_cols_path)
-        healthy_baseline = joblib.load(baseline_path)
+        model = joblib.load(Config.MODEL_PATH)
+        scaler = joblib.load(Config.SCALER_PATH)
+        feature_names = joblib.load(Config.FEATURE_COLS_PATH)
+        healthy_baseline = joblib.load(Config.BASELINE_PATH)
         
         # Instantiate helper classes
-        explainer = ModelExplainer()
+        explainer = ModelExplainer(
+            model_path=Config.MODEL_PATH,
+            scaler_path=Config.SCALER_PATH,
+            feature_cols_path=Config.FEATURE_COLS_PATH
+        )
         explainer.load_artifacts()
         explainer.baseline_healthy = healthy_baseline
         
         feature_engineer = FeatureEngineer()
-        print("API startup: Model and artifacts successfully loaded.")
+        logger.info("Successfully loaded all machine learning model artifacts.")
         
     except Exception as e:
-        print(f"CRITICAL: Failed to load model artifacts on startup: {str(e)}")
+        logger.error(f"Critical error loading model weights: {str(e)}")
+        # We don't crash the server immediately, but flags will remain None causing 503s
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Context manager handling startup and shutdown events."""
+    logger.info("Initializing API application container...")
+    load_model_artifacts()
+    yield
+    logger.info("Shutting down API application container...")
+
+app = FastAPI(
+    title="IoT Predictive Maintenance API",
+    description="Enterprise API exposing real-time predictive maintenance warnings.",
+    version="1.1.0",
+    lifespan=lifespan
+)
+
+# CORS configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Exception Handlers
+@app.exception_handler(PredictiveMaintenanceException)
+async def custom_exception_handler(request: Request, exc: PredictiveMaintenanceException):
+    """Intercepts custom domain exceptions and returns structured JSON error payloads."""
+    logger.error(f"Domain exception on {request.url.path}: {exc.message} (status: {exc.status_code})")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.message, "error_type": exc.__class__.__name__}
+    )
+
+@app.exception_handler(Exception)
+async def fallback_exception_handler(request: Request, exc: Exception):
+    """Catches unhandled raw runtime exceptions to prevent stack trace leaks."""
+    logger.exception(f"Unhandled runtime panic on {request.url.path}:")
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "An internal server error occurred.", "error_type": "RuntimeError"}
+    )
+
+# Endpoints
 @app.get("/health", response_model=HealthResponse)
 def health_check():
-    """Returns the operational status of the API and model weights."""
+    """Diagnostic check confirming database and model states."""
+    logger.debug("Health check requested.")
     return HealthResponse(
         status="healthy",
         model_loaded=(model is not None),
@@ -78,49 +119,52 @@ def health_check():
 @app.post("/predict", response_model=PredictionResponse)
 def predict_health(request: PredictionRequest):
     """
-    Accepts historical sensor data for a machine, engineers rolling features
-    on-the-fly, and predicts failure probability and contributors.
+    Ingests live sensor telemetry histories, calculates rolling metrics,
+    and returns failure warnings alongside root drivers.
     """
+    logger.info(f"Prediction requested for machine ID: {request.machine_id}")
+    
     if model is None or scaler is None or feature_names is None:
-        raise HTTPException(status_code=503, detail="Model artifacts are not loaded on server.")
+        raise ModelNotLoadedError()
         
     if len(request.history) < 1:
-        raise HTTPException(status_code=400, detail="Telemetry history cannot be empty.")
+        raise DataValidationError("Telemetry history input array cannot be empty.")
         
     try:
-        # 1. Convert request data to DataFrame
+        # Convert Pydantic records to pandas
         records = [record.dict() for record in request.history]
         df_raw = pd.DataFrame(records)
         df_raw["timestamp"] = pd.to_datetime(df_raw["timestamp"])
         df_raw["machine_id"] = request.machine_id
         
-        # 2. Run Feature Engineering
-        # To compute rolling features correctly, we need the history
+        # Calculate features on the fly
         df_feat = feature_engineer.transform(df_raw)
         
-        # Extract the latest record (which represents the current time step we want to predict)
         latest_record = df_feat.iloc[-1]
         latest_timestamp_str = str(latest_record["timestamp"])
         
-        # 3. Format and scale features
+        # Extract features and scale
         X_df = latest_record[feature_names].to_frame().T
         X_scaled = scaler.transform(X_df)
         
-        # 4. Model Inference
+        # Predict probability
         failure_prob = float(model.predict_proba(X_scaled)[0, 1])
         
-        # 5. Risk and Recommendations
+        # Risk thresholds mapping
         if failure_prob >= 0.20:
             risk_level = "High"
             recommendation = "CRITICAL ALERT: High probability of breakdown. Schedule immediate maintenance shutdown."
-        elif failure_prob >= DECISION_THRESHOLD:
+            logger.warning(f"CRITICAL failure warning issued for {request.machine_id} (prob: {failure_prob:.4f})")
+        elif failure_prob >= Config.DECISION_THRESHOLD:
             risk_level = "Medium"
             recommendation = "WARNING: Sensor anomalies detected. Schedule preventative check and maintenance."
+            logger.warning(f"Anomalous maintenance warning issued for {request.machine_id} (prob: {failure_prob:.4f})")
         else:
             risk_level = "Low"
             recommendation = "HEALTHY: Machine operating normally. Continue standard monitoring schedule."
+            logger.info(f"Machine {request.machine_id} evaluated healthy (prob: {failure_prob:.4f})")
             
-        # 6. Local Explainability
+        # Compute local attributions
         latest_features_dict = latest_record[feature_names].to_dict()
         explanation = explainer.explain_instance(latest_features_dict)
         top_drivers = [(feat, float(score)) for feat, score in explanation["top_drivers"]]
@@ -130,54 +174,67 @@ def predict_health(request: PredictionRequest):
             timestamp=latest_timestamp_str,
             failure_probability=failure_prob,
             risk_level=risk_level,
-            threshold_used=DECISION_THRESHOLD,
+            threshold_used=Config.DECISION_THRESHOLD,
             top_drivers=top_drivers,
             recommendation=recommendation
         )
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+        logger.exception("Failed execution of inference engine:")
+        raise InferenceError(f"Prediction failed: {str(e)}")
 
 @app.post("/predict/batch")
 def predict_batch_csv(file: UploadFile = File(...)):
-    """
-    Accepts an uploaded CSV file containing telemetry, runs full feature
-    engineering, and returns failure warnings and timestamps.
-    """
+    """Accepts telemetry logs uploads, runs batch predictions, and summarizes risk windows."""
+    logger.info(f"Batch prediction CSV uploaded: {file.filename}")
+    
     if model is None or scaler is None or feature_names is None:
-        raise HTTPException(status_code=503, detail="Model artifacts not loaded.")
+        raise ModelNotLoadedError()
         
     try:
         contents = file.file.read()
+        if not contents:
+            raise DataValidationError("Uploaded CSV file is empty.")
+            
         df_raw = pd.read_csv(BytesIO(contents))
+        
+        # Check columns
+        required_cols = ["timestamp", "machine_id", "voltage", "temperature", "vibration", "pressure", "rotational_speed", "tool_wear"]
+        missing = [col for col in required_cols if col not in df_raw.columns]
+        if missing:
+            raise DataValidationError(f"Missing required columns in batch CSV: {missing}")
+            
         df_raw["timestamp"] = pd.to_datetime(df_raw["timestamp"])
         
         # Run features
         df_feat = feature_engineer.transform(df_raw)
         
-        # Separate features
+        # Separate features and predict
         X_df = df_feat[feature_names]
         X_scaled = scaler.transform(X_df)
         
-        # Predict
         probs = model.predict_proba(X_scaled)[:, 1]
-        preds = (probs >= DECISION_THRESHOLD).astype(int)
+        preds = (probs >= Config.DECISION_THRESHOLD).astype(int)
         
         df_feat["failure_probability"] = probs
         df_feat["predicted_risk"] = preds
-        df_feat["risk_level"] = np.where(probs >= 0.20, "High", np.where(probs >= DECISION_THRESHOLD, "Medium", "Low"))
+        df_feat["risk_level"] = np.where(probs >= 0.20, "High", np.where(probs >= Config.DECISION_THRESHOLD, "Medium", "Low"))
         
-        # Filter high and medium risk timestamps for reporting
+        # Filter warnings
         warnings_df = df_feat[df_feat["predicted_risk"] == 1][["timestamp", "machine_id", "failure_probability", "risk_level"]]
         
-        summary = {
+        logger.info(f"Batch processing completed. Identified {len(warnings_df)} alerts.")
+        
+        return {
             "total_records": len(df_raw),
             "warnings_detected": len(warnings_df),
             "high_risk_alerts": int(sum(df_feat["risk_level"] == "High")),
             "medium_risk_warnings": int(sum(df_feat["risk_level"] == "Medium")),
             "alerts": warnings_df.head(100).to_dict(orient="records")
         }
-        return summary
         
+    except PredictiveMaintenanceException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Batch prediction error: {str(e)}")
+        logger.exception("Failed execution of batch inference engine:")
+        raise InferenceError(f"Batch inference failed: {str(e)}")

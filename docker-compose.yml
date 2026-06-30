@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  # 1. FastAPI Predictive Model Backend
+  api:
+    build: .
+    container_name: predictive_api
+    command: >
+      sh -c "python data/generate_dataset.py &&
+             python -m src.train &&
+             uvicorn api.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DECISION_THRESHOLD=0.15
+      - MLFLOW_ALLOW_FILE_STORE=true
+      - LOG_LEVEL=INFO
+      - LOG_FILE=logs/app.log
+    volumes:
+      - .:/app
+    restart: always
+
+  # 2. Streamlit Operator UI Frontend
+  dashboard:
+    build: .
+    container_name: predictive_dashboard
+    command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      - BACKEND_API_URL=http://api:8000
+    depends_on:
+      - api
+    volumes:
+      - .:/app
+    restart: always

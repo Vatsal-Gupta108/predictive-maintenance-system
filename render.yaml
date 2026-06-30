@@ -1,0 +1,26 @@
+services:
+  # 1. FastAPI Inference Backend Service
+  - type: web
+    name: predictive-maintenance-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt && python data/generate_dataset.py && python -m src.train
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DECISION_THRESHOLD
+        value: 0.15
+      - key: MLFLOW_TRACKING_URI
+        value: sqlite:///mlflow.db
+
+  # 2. Streamlit Operator UI Service
+  - type: web
+    name: predictive-maintenance-dashboard
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run dashboard/app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: BACKEND_API_URL
+        value: https://predictive-maintenance-api.onrender.com

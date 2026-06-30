@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import mlflow
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
@@ -11,10 +12,21 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 
 from src.data_ingestion import DataIngestor
 from src.feature_engineering import FeatureEngineer
+from src.config import Config
+from src.logger import get_logger
+
+# Initialize Logger
+logger = get_logger("TrainPipeline")
+
+# Setup MLflow Tracking Configuration
+mlflow.set_tracking_uri(Config.MLFLOW_TRACKING_URI)
+mlflow.set_experiment(Config.MLFLOW_EXPERIMENT_NAME)
 
 def train_and_evaluate_models():
+    logger.info("Initializing model training pipeline...")
+    
     # 1. Ingest and Engineer Features
-    print("Ingesting and preparing data...")
+    logger.info("Starting data ingestion and preprocessing...")
     ingestor = DataIngestor(
         telemetry_path="data/raw/sensor_telemetry.csv",
         maintenance_path="data/raw/maintenance_log.csv"
@@ -25,8 +37,7 @@ def train_and_evaluate_models():
     df = engineer.fit_transform(raw_df)
     
     # 2. Chronological Train-Val-Test Split
-    # Since timestamps are sorted, we split by indexing to avoid leaking future data
-    print("Splitting data chronologically...")
+    logger.info("Performing chronological split to prevent time leakage...")
     unique_timestamps = sorted(df["timestamp"].unique())
     num_timestamps = len(unique_timestamps)
     
@@ -40,9 +51,7 @@ def train_and_evaluate_models():
     val_df = df[(df["timestamp"] > train_cutoff) & (df["timestamp"] <= val_cutoff)]
     test_df = df[df["timestamp"] > val_cutoff]
     
-    print(f"Train set: {train_df.shape[0]} rows (up to {train_cutoff})")
-    print(f"Val set: {val_df.shape[0]} rows ({train_cutoff} to {val_cutoff})")
-    print(f"Test set: {test_df.shape[0]} rows (after {val_cutoff})")
+    logger.info(f"Train rows: {train_df.shape[0]} | Val rows: {val_df.shape[0]} | Test rows: {test_df.shape[0]}")
     
     # 3. Separate Features and Target
     target_col = "failure_within_window"
@@ -59,7 +68,7 @@ def train_and_evaluate_models():
     y_test = test_df[target_col]
     
     # 4. Scale Features
-    print("Scaling features...")
+    logger.info("Fitting feature standardizer...")
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_val_scaled = scaler.transform(X_val)
@@ -67,8 +76,9 @@ def train_and_evaluate_models():
     
     # Save the scaler and feature columns for live API use
     os.makedirs("models", exist_ok=True)
-    joblib.dump(scaler, "models/scaler.joblib")
-    joblib.dump(feature_cols, "models/feature_cols.joblib")
+    joblib.dump(scaler, Config.SCALER_PATH)
+    joblib.dump(feature_cols, Config.FEATURE_COLS_PATH)
+    logger.info("Saved feature names and scaler metadata.")
     
     # 5. Define Models
     models = {
@@ -89,88 +99,120 @@ def train_and_evaluate_models():
         )
     }
     
-    # 6. Train and Compare Models
+    # 6. Train and Compare Models with MLflow tracking
     results = {}
     best_f1 = -1.0
     best_model_name = None
     best_model = None
     
     for name, model in models.items():
-        print(f"Training {name}...")
-        model.fit(X_train_scaled, y_train)
+        logger.info(f"Training and logging candidate: {name}")
         
-        # Predict on validation set
-        y_val_pred = model.predict(X_val_scaled)
-        y_val_proba = model.predict_proba(X_val_scaled)[:, 1] if hasattr(model, "predict_proba") else y_val_pred
-        
-        # Evaluate
-        accuracy = accuracy_score(y_val, y_val_pred)
-        precision = precision_score(y_val, y_val_pred, zero_division=0)
-        recall = recall_score(y_val, y_val_pred, zero_division=0)
-        f1 = f1_score(y_val, y_val_pred, zero_division=0)
-        roc_auc = roc_auc_score(y_val, y_val_proba)
-        
-        results[name] = {
-            "Accuracy": accuracy,
-            "Precision": precision,
-            "Recall": recall,
-            "F1-Score": f1,
-            "ROC-AUC": roc_auc
-        }
-        
-        print(f"{name} - Val F1: {f1:.4f} | Recall: {recall:.4f} | Precision: {precision:.4f} | ROC-AUC: {roc_auc:.4f}")
-        
-        # Track best model based on F1-Score
-        if f1 > best_f1:
-            best_f1 = f1
-            best_model_name = name
-            best_model = model
+        # Start MLflow run for each classifier
+        with mlflow.start_run(run_name=name.replace(" ", "_")):
+            # Train
+            model.fit(X_train_scaled, y_train)
             
-    print(f"\nBest model based on Validation F1-Score: {best_model_name} (F1: {best_f1:.4f})")
+            # Predict
+            y_val_pred = model.predict(X_val_scaled)
+            y_val_proba = model.predict_proba(X_val_scaled)[:, 1] if hasattr(model, "predict_proba") else y_val_pred
+            
+            # Metrics
+            accuracy = accuracy_score(y_val, y_val_pred)
+            precision = precision_score(y_val, y_val_pred, zero_division=0)
+            recall = recall_score(y_val, y_val_pred, zero_division=0)
+            f1 = f1_score(y_val, y_val_pred, zero_division=0)
+            roc_auc = roc_auc_score(y_val, y_val_proba)
+            
+            # Log params to MLflow
+            mlflow.log_param("classifier", name)
+            if hasattr(model, "class_weight"):
+                mlflow.log_param("class_weight", str(model.class_weight))
+            if hasattr(model, "n_estimators"):
+                mlflow.log_param("n_estimators", model.n_estimators)
+            if hasattr(model, "max_iter"):
+                mlflow.log_param("max_iter", model.max_iter)
+            if hasattr(model, "learning_rate"):
+                mlflow.log_param("learning_rate", model.learning_rate)
+                
+            # Log metrics to MLflow
+            mlflow.log_metric("val_accuracy", accuracy)
+            mlflow.log_metric("val_precision", precision)
+            mlflow.log_metric("val_recall", recall)
+            mlflow.log_metric("val_f1_score", f1)
+            mlflow.log_metric("val_roc_auc", roc_auc)
+            
+            results[name] = {
+                "Accuracy": accuracy,
+                "Precision": precision,
+                "Recall": recall,
+                "F1-Score": f1,
+                "ROC-AUC": roc_auc
+            }
+            
+            logger.info(f"{name} metrics logged. Val F1: {f1:.4f} | Recall: {recall:.4f}")
+            
+            # Track best model based on F1-Score
+            if f1 > best_f1:
+                best_f1 = f1
+                best_model_name = name
+                best_model = model
+                
+    logger.info(f"Champion candidate: {best_model_name} (F1: {best_f1:.4f})")
     
     # 7. Evaluate Best Model on Test Set (Final Holdout)
-    print(f"Evaluating {best_model_name} on Test set...")
-    y_test_pred = best_model.predict(X_test_scaled)
-    y_test_proba = best_model.predict_proba(X_test_scaled)[:, 1]
+    logger.info(f"Evaluating Champion {best_model_name} on holdout Test set...")
     
-    test_accuracy = accuracy_score(y_test, y_test_pred)
-    test_precision = precision_score(y_test, y_test_pred, zero_division=0)
-    test_recall = recall_score(y_test, y_test_pred, zero_division=0)
-    test_f1 = f1_score(y_test, y_test_pred, zero_division=0)
-    test_roc_auc = roc_auc_score(y_test, y_test_proba)
-    
-    print("\n--- Final Test Set Results ---")
-    print(f"Model: {best_model_name}")
-    print(f"Accuracy:  {test_accuracy:.4f}")
-    print(f"Precision: {test_precision:.4f}")
-    print(f"Recall:    {test_recall:.4f}")
-    print(f"F1-Score:  {test_f1:.4f}")
-    print(f"ROC-AUC:   {test_roc_auc:.4f}")
-    
-    # 8. Save Best Model
-    model_save_path = "models/best_model.joblib"
-    joblib.dump(best_model, model_save_path)
-    print(f"Saved best model to: {model_save_path}")
-    
-    # Save model details for report
-    results_df = pd.DataFrame(results).T
-    results_df.to_csv("models/comparison_results.csv")
-    
-    # 9. Plot and Save Confusion Matrix for Test Set
-    cm = confusion_matrix(y_test, y_test_pred)
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False,
-                xticklabels=["Healthy", "Risk Warning"],
-                yticklabels=["Healthy", "Risk Warning"])
-    plt.title(f"Test Set Confusion Matrix - {best_model_name}", fontsize=12, pad=15)
-    plt.ylabel("Actual State")
-    plt.xlabel("Predicted State")
-    plt.tight_layout()
-    
-    os.makedirs("docs/assets", exist_ok=True)
-    plt.savefig("docs/assets/confusion_matrix.png", dpi=150)
-    plt.close()
-    print("Confusion matrix saved to: docs/assets/confusion_matrix.png")
+    with mlflow.start_run(run_name=f"Champion_{best_model_name.replace(' ', '_')}"):
+        y_test_pred = best_model.predict(X_test_scaled)
+        y_test_proba = best_model.predict_proba(X_test_scaled)[:, 1]
+        
+        test_accuracy = accuracy_score(y_test, y_test_pred)
+        test_precision = precision_score(y_test, y_test_pred, zero_division=0)
+        test_recall = recall_score(y_test, y_test_pred, zero_division=0)
+        test_f1 = f1_score(y_test, y_test_pred, zero_division=0)
+        test_roc_auc = roc_auc_score(y_test, y_test_proba)
+        
+        logger.info(f"Test F1-Score: {test_f1:.4f} | Recall: {test_recall:.4f}")
+        
+        # Save Best Model locally
+        joblib.dump(best_model, Config.MODEL_PATH)
+        
+        # Save model details for report
+        results_df = pd.DataFrame(results).T
+        results_df.to_csv("models/comparison_results.csv")
+        
+        # Plot Confusion Matrix
+        cm = confusion_matrix(y_test, y_test_pred)
+        plt.figure(figsize=(6, 5))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False,
+                    xticklabels=["Healthy", "Risk Warning"],
+                    yticklabels=["Healthy", "Risk Warning"])
+        plt.title(f"Test Set Confusion Matrix - {best_model_name}", fontsize=12, pad=15)
+        plt.ylabel("Actual State")
+        plt.xlabel("Predicted State")
+        plt.tight_layout()
+        
+        os.makedirs("docs/assets", exist_ok=True)
+        matrix_path = "docs/assets/confusion_matrix.png"
+        plt.savefig(matrix_path, dpi=150)
+        plt.close()
+        
+        # Log holdout metrics to MLflow champion run
+        mlflow.log_param("classifier", best_model_name)
+        mlflow.log_metric("test_accuracy", test_accuracy)
+        mlflow.log_metric("test_precision", test_precision)
+        mlflow.log_metric("test_recall", test_recall)
+        mlflow.log_metric("test_f1_score", test_f1)
+        mlflow.log_metric("test_roc_auc", test_roc_auc)
+        
+        # Log local files as MLflow run artifacts
+        mlflow.log_artifact(Config.MODEL_PATH, artifact_path="model")
+        mlflow.log_artifact(matrix_path, artifact_path="plots")
+        mlflow.log_artifact("models/comparison_results.csv", artifact_path="reports")
+        logger.info("Logged champion artifacts, metrics, and confusion matrix plots to MLflow tracking database.")
+        
+    logger.info("Training pipeline execution completed successfully.")
 
 if __name__ == "__main__":
     train_and_evaluate_models()

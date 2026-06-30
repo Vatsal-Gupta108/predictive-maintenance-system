@@ -1,0 +1,42 @@
+name: CI/CD Pipeline - Predictive Maintenance System
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test-and-validate:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install System Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Set Environment Variables
+      run: |
+        echo "MLFLOW_ALLOW_FILE_STORE=true" >> $GITHUB_ENV
+
+    - name: Generate Simulation Telemetry
+      run: |
+        python data/generate_dataset.py
+
+    - name: Compile and Train Champion Model
+      run: |
+        python -m src.train
+
+    - name: Run Test Suite
+      run: |
+        python -m pytest -v
