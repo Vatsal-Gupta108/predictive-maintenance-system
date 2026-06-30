@@ -5,6 +5,10 @@ import matplotlib.pyplot as plt
 import requests
 import joblib
 import os
+import sys
+
+# Dynamic path resolution to import from root 'src' directory
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.feature_engineering import FeatureEngineer
 from src.explain import ModelExplainer
