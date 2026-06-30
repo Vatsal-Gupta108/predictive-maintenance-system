@@ -1,3 +1,14 @@
+---
+title: IoT Industrial Predictive Maintenance System
+emoji: ⚙️
+colorFrom: blue
+colorTo: indigo
+sdk: streamlit
+sdk_version: 1.22.0
+app_file: dashboard/app.py
+pinned: false
+---
+
 # AI-Powered Industrial Predictive Maintenance System
 
 An end-to-end, industry-grade Machine Learning and IoT predictive maintenance system designed to predict mechanical breakdowns in manufacturing machinery before they occur.
