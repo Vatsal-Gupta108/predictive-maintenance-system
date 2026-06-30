@@ -428,3 +428,7 @@ elif mode == "Batch CSV Upload":
                 else:
                     st.balloons()
                     st.success("No anomalies or breakdown risks detected in the uploaded telemetry logs!")
+
+# Developer Signature
+st.sidebar.markdown("---")
+st.sidebar.markdown("<p style='text-align: center; color: #94a3b8; font-size: 0.85rem;'>Developed by <b>Vatsal Gupta</b></p>", unsafe_allow_html=True)
