@@ -435,4 +435,9 @@ elif mode == "Batch CSV Upload":
 
 # Developer Signature
 st.sidebar.markdown("---")
-st.sidebar.markdown("<p style='text-align: center; color: #94a3b8; font-size: 0.85rem;'>Developed by <b>Vatsal Gupta</b></p>", unsafe_allow_html=True)
+st.sidebar.markdown("""
+<div style='text-align: center; color: #94a3b8; font-size: 0.8rem;'>
+    Developed by <b>Vatsal Gupta</b><br>
+    Email: <a href='mailto:vatsalgupta1008@gmail.com' style='color: #3b82f6;'>vatsalgupta1008@gmail.com</a> for queries or issues
+</div>
+""", unsafe_allow_html=True)
