@@ -141,6 +141,33 @@ def load_raw_telemetry():
         return df
     return None
 
+# App Session State Initialization
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+# Render Login Page if not authenticated
+if not st.session_state.authenticated:
+    st.title("🔐 Factory-Floor Operator Portal Login")
+    st.markdown("Please enter your operator credentials to access the live dashboard.")
+    
+    col_login, _ = st.columns([1, 1])
+    with col_login:
+        with st.form("login_form"):
+            username = st.text_input("Username", value="admin")
+            password = st.text_input("Password", type="password", value="")
+            submitted = st.form_submit_button("Authenticate Portal")
+            if submitted:
+                if username == "admin" and password == "admin123":
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("❌ Invalid Username or Password")
+    
+    st.info("💡 Hint: Default Operator Credentials are Username: **admin** | Password: **admin123**")
+    st.markdown("---")
+    st.markdown("<p style='color: #94a3b8; font-size: 0.8rem;'>Developed by <b>Vatsal Gupta</b> | Email: <a href='mailto:vatsalgupta1008@gmail.com' style='color: #3b82f6; text-decoration: none;'>vatsalgupta1008@gmail.com</a></p>", unsafe_allow_html=True)
+    st.stop()
+
 # App Layout
 st.title("⚙️ factory-floor IoT Predictive Maintenance dashboard")
 st.markdown("---")
@@ -432,6 +459,12 @@ elif mode == "Batch CSV Upload":
                 else:
                     st.balloons()
                     st.success("No anomalies or breakdown risks detected in the uploaded telemetry logs!")
+
+# Logout action
+st.sidebar.markdown("---")
+if st.sidebar.button("Logout 🔓"):
+    st.session_state.authenticated = False
+    st.rerun()
 
 # Developer Signature
 st.sidebar.markdown("---")
