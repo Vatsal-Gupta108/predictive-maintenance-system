@@ -5,7 +5,8 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=off \
-    PIP_DISABLE_PIP_VERSION_CHECK=on
+    PIP_DISABLE_PIP_VERSION_CHECK=on \
+    MLFLOW_ALLOW_FILE_STORE=true
 
 # Set working directory inside the container
 WORKDIR /app
@@ -19,9 +20,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application codebase
 COPY . .
 
-# Expose ports for FastAPI (8000) and Streamlit (8501)
-EXPOSE 8000
-EXPOSE 8501
+# Generate dataset and train the model during build so weights are baked into the container image
+RUN python data/generate_dataset.py && python -m src.train
 
-# Default command launches FastAPI backend
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Expose port 7860 for Hugging Face Spaces
+EXPOSE 7860
+
+# Default command launches Streamlit dashboard on port 7860
+CMD ["streamlit", "run", "dashboard/app.py", "--server.port", "7860", "--server.address", "0.0.0.0"]
