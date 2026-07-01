@@ -153,7 +153,7 @@ if not st.session_state.authenticated:
     col_login, _ = st.columns([1, 1])
     with col_login:
         with st.form("login_form"):
-            username = st.text_input("Username", value="admin")
+            username = st.text_input("Username", value="")
             password = st.text_input("Password", type="password", value="")
             submitted = st.form_submit_button("Authenticate Portal")
             if submitted:
@@ -163,7 +163,6 @@ if not st.session_state.authenticated:
                 else:
                     st.error("❌ Invalid Username or Password")
     
-    st.info("💡 Hint: Default Operator Credentials are Username: **admin** | Password: **admin123**")
     st.markdown("---")
     st.markdown("<p style='color: #94a3b8; font-size: 0.8rem;'>Developed by <b>Vatsal Gupta</b> | Email: <a href='mailto:vatsalgupta1008@gmail.com' style='color: #3b82f6; text-decoration: none;'>vatsalgupta1008@gmail.com</a></p>", unsafe_allow_html=True)
     st.stop()
